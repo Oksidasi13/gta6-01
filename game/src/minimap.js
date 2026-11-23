@@ -1,75 +1,111 @@
-// Vice Shores — the minimap: the whole city shrunk into the HUD's corner, with the
-// roads, the player, the mission marker, the police and the traffic on it.
-import { ROADS_VERTICAL, ROADS_HORIZONTAL } from './config.js';
-import { currentMarker } from './missions.js';
+// Vice Shores — live minimap: the whole city shrunk into the corner.
+// Bottom-left, with a border. Health/armour bars sit under it (drawn by hud.js).
 
-/** Draw the minimap at (x, y) with size (w, h). */
-export function drawMinimap(ctx, state, x, y, w, h) {
-  const city = state.city;
-  const sx = w / city.width;
-  const sy = h / city.height;
-  ctx.save();
-  ctx.fillStyle = 'rgba(10,12,20,0.72)';
-  ctx.fillRect(x, y, w, h);
-  ctx.strokeStyle = 'rgba(255,255,255,0.35)';
-  ctx.lineWidth = 1;
-  ctx.strokeRect(x + 0.5, y + 0.5, w, h);
-  // Water and sand at the bottom.
-  ctx.fillStyle = '#1d6f9e';
-  ctx.fillRect(x, y + (2320 * sy), w, h - 2320 * sy);
+import { COLORS } from './config.js';
+import { missionTarget } from './missions.js';
+
+export const MAP_W = 190;
+export const MAP_H = 143; // keeps the 3200x2400 aspect
+export const MAP_X = 12;
+export const MAP_Y_OFFSET = 60; // space left under the map for the HP/armour bars
+
+export function drawMinimap(ctx, world, w, h) {
+  const x0 = MAP_X;
+  const y0 = h - MAP_H - MAP_Y_OFFSET;
+  const sx = MAP_W / world.city.w;
+  const sy = MAP_H / world.city.h;
+  const X = (x) => x0 + x * sx;
+  const Y = (y) => y0 + y * sy;
+
+  ctx.fillStyle = 'rgba(10, 14, 20, 0.78)';
+  ctx.fillRect(x0 - 4, y0 - 4, MAP_W + 8, MAP_H + 8);
+  // Grass.
+  ctx.fillStyle = '#3f7d3c';
+  ctx.fillRect(x0, y0, MAP_W, MAP_H);
+  // Water + beach.
+  ctx.fillStyle = '#2f7fc9';
+  ctx.fillRect(x0, Y(world.city.waterY), MAP_W, y0 + MAP_H - Y(world.city.waterY));
   ctx.fillStyle = '#e8d29a';
-  ctx.fillRect(x, y + (2200 * sy), w, 120 * sy);
-  // Roads.
-  ctx.fillStyle = '#5a5f6b';
-  for (const rx of ROADS_VERTICAL) ctx.fillRect(x + rx * sx - 2, y, 4, h);
-  for (const ry of ROADS_HORIZONTAL) ctx.fillRect(x, y + ry * sy - 2, w, 4);
+  ctx.fillRect(x0, Y(world.city.beachY), MAP_W, Y(world.city.waterY) - Y(world.city.beachY));
   // Parks.
-  ctx.fillStyle = '#3f7a4a';
-  for (const park of city.parks) {
-    ctx.fillRect(x + park.x0 * sx, y + park.y0 * sy, (park.x1 - park.x0) * sx, (park.y1 - park.y0) * sy);
+  ctx.fillStyle = '#2f7a2c';
+  for (const park of world.city.parks) {
+    ctx.fillRect(X(park.x), Y(park.y), Math.max(2, park.w * sx), Math.max(2, park.h * sy));
   }
-  // Traffic and parked cars.
-  ctx.fillStyle = '#c9c9c9';
-  for (const car of state.cars) {
-    if (car.kind === 'police') continue;
-    ctx.fillRect(x + car.x * sx - 1, y + car.y * sy - 1, 2, 2);
+  // Roads.
+  ctx.fillStyle = '#c8ccd2';
+  for (const rx of world.city.roadsX) ctx.fillRect(X(rx) - 1, y0, 2, MAP_H);
+  for (const ry of world.city.roadsY) ctx.fillRect(x0, Y(ry) - 1, MAP_W, 2);
+  // Garage marker.
+  ctx.fillStyle = '#7CFC00';
+  ctx.fillRect(X(world.city.garage.x + 35) - 2, Y(world.city.garage.y + 40) - 2, 4, 4);
+  // Traffic as grey dots.
+  ctx.fillStyle = '#9aa0a6';
+  for (const car of [...world.traffic.aiCars, ...world.traffic.parked]) {
+    ctx.fillRect(X(car.x) - 1, Y(car.y) - 1, 2, 2);
   }
-  // Police: red-blue dots.
-  ctx.fillStyle = '#ff4d4d';
-  for (const car of state.cars) {
-    if (car.kind !== 'police') continue;
-    ctx.fillRect(x + car.x * sx - 2, y + car.y * sy - 2, 4, 4);
+  // Police as red dots — always while wanted, or for 20s after Eyes Out.
+  const showPolice = world.wanted.stars > 0 || world.abilities.eyesOut.active > 0;
+  if (showPolice) {
+    ctx.fillStyle = '#ff3b30';
+    for (const car of world.police.cars) {
+      ctx.beginPath();
+      ctx.arc(X(car.x), Y(car.y), 3, 0, Math.PI * 2);
+      ctx.fill();
+    }
+    if (world.police.roadblock) {
+      for (const car of world.police.roadblock.cars) {
+        ctx.fillRect(X(car.x) - 2, Y(car.y) - 2, 4, 4);
+      }
+    }
   }
-  for (const cop of state.cops) {
-    ctx.fillRect(x + cop.x * sx - 2, y + cop.y * sy - 2, 4, 4);
-  }
-  // Mission marker: pulsing yellow diamond.
-  const marker = currentMarker(state);
-  if (marker) {
-    const pulse = 3 + Math.sin(state.time * 5) * 1.5;
-    ctx.fillStyle = '#ffd23e';
-    const mx = x + marker.x * sx;
-    const my = y + marker.y * sy;
+  // Rival (yellow) and target (purple) while their missions run.
+  if (world.rival) {
+    ctx.fillStyle = '#ffd23f';
     ctx.beginPath();
-    ctx.moveTo(mx, my - pulse - 3);
-    ctx.lineTo(mx + pulse + 3, my);
-    ctx.lineTo(mx, my + pulse + 3);
-    ctx.lineTo(mx - pulse - 3, my);
-    ctx.closePath();
+    ctx.arc(X(world.rival.car.x), Y(world.rival.car.y), 3, 0, Math.PI * 2);
     ctx.fill();
   }
-  // The player: a white arrow.
-  const px = x + state.player.x * sx;
-  const py = y + state.player.y * sy;
+  if (world.target && !world.target.car.wrecked) {
+    ctx.fillStyle = '#c084fc';
+    ctx.beginPath();
+    ctx.arc(X(world.target.car.x), Y(world.target.car.y), 3, 0, Math.PI * 2);
+    ctx.fill();
+  }
+  // Helicopter as a yellow ring.
+  if (world.heli.active) {
+    ctx.strokeStyle = '#ffd23f';
+    ctx.lineWidth = 2;
+    ctx.beginPath();
+    ctx.arc(X(world.heli.x), Y(world.heli.y), 4, 0, Math.PI * 2);
+    ctx.stroke();
+  }
+  // Mission marker: pulsing yellow diamond.
+  const target = missionTarget(world.missions);
+  if (target) {
+    const pulse = 3 + Math.sin(world.time * 5) * 1.2;
+    ctx.save();
+    ctx.translate(X(target.x), Y(target.y));
+    ctx.rotate(Math.PI / 4);
+    ctx.fillStyle = '#ffd23f';
+    ctx.fillRect(-pulse / 2, -pulse / 2, pulse, pulse);
+    ctx.restore();
+  }
+  // Player: white arrow.
+  const p = world.player;
+  ctx.save();
+  ctx.translate(X(p.x), Y(p.y));
+  ctx.rotate(p.angle);
   ctx.fillStyle = '#ffffff';
   ctx.beginPath();
-  ctx.arc(px, py, 4, 0, Math.PI * 2);
+  ctx.moveTo(6, 0);
+  ctx.lineTo(-4, -4);
+  ctx.lineTo(-4, 4);
+  ctx.closePath();
   ctx.fill();
-  ctx.strokeStyle = '#111111';
-  ctx.lineWidth = 1;
-  ctx.beginPath();
-  ctx.moveTo(px, py);
-  ctx.lineTo(px + Math.cos(state.player.angle) * 8, py + Math.sin(state.player.angle) * 8);
-  ctx.stroke();
   ctx.restore();
+  // Frame.
+  ctx.strokeStyle = 'rgba(255,255,255,0.6)';
+  ctx.lineWidth = 1;
+  ctx.strokeRect(x0 - 4, y0 - 4, MAP_W + 8, MAP_H + 8);
 }

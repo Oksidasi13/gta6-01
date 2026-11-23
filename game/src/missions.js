@@ -1,138 +1,216 @@
-// Vice Shores — the story: three missions with a beginning, a middle and a payout.
-// Each mission has stages; the world checks the objective every step and advances
-// the story when the player delivers. After the third, the city is the player's.
-import { MISSION_PAYOUTS } from './config.js';
-import { makeGoldCar } from './cars.js';
+// Vice Shores — the eight-mission story arc.
+// Pure state machine: update(missions, ctx, dt) returns events the world
+// acts on (payouts, wanted changes, spawns, dialogue). No DOM here.
+// Stage kinds: steal | reach | reachInCar | pickup | deliver | thugs
+//              | race | ram. Each stage may set a wanted level on entry.
 
-export const MISSIONS = [
+import { MARKERS, PAYOUTS, MISSION_RP } from './config.js';
+
+export const MISSION_DEFS = [
   {
-    name: 'The Courier',
-    intro: 'Mara needs a package moved from the Marina Docks to the north side. No questions. Go get it.',
+    name: 'First Wheels',
+    payout: PAYOUTS[0], rp: MISSION_RP[0],
+    dialogue: { name: 'MIRA KESANG', text: "Grab any wheels you can — the beachfront won't wait." },
     stages: [
-      { text: 'Pick up the package at the Marina Docks', marker: 'docks' },
-      { text: 'Deliver the package to the drop-off', marker: 'delivery' },
+      { kind: 'steal', text: 'Steal any car', hint: 'Press E near a car' },
+      { kind: 'reachInCar', target: () => ({ ...MARKERS.beachfront }), text: 'Drive it to the beachfront marker', hint: 'Follow the yellow diamond' },
     ],
   },
   {
-    name: 'Getaway',
-    intro: 'A gold coupe is waiting on Coral Street. Take it — and lose the heat before you reach the Safehouse.',
+    name: 'Hot Pursuit',
+    payout: PAYOUTS[1], rp: MISSION_RP[1],
+    dialogue: { name: 'MIRA KESANG', text: "Two stars already? Drive north and don't stop for anyone." },
     stages: [
-      { text: 'Steal the gold coupe on Coral Street', marker: 'goldCarSpot' },
-      { text: 'Lose the cops, then reach the Safehouse', marker: 'safehouse' },
+      { kind: 'reach', target: () => ({ ...MARKERS.hideout }), wanted: 2, text: 'Reach the hideout up north — 2 stars on you', hint: 'Do not get busted' },
     ],
   },
   {
-    name: 'Payback',
-    intro: 'The crew that set you up is holed up in the old Hideout. Three guards. Make it count.',
+    name: 'Beachfront Payday',
+    payout: PAYOUTS[2], rp: MISSION_RP[2],
+    dialogue: { name: 'MIRA KESANG', text: 'The package is at the pier. Three stars on the tail — keep moving.' },
     stages: [
-      { text: 'Reach the Hideout', marker: 'hideout' },
-      { text: 'Take out the three guards', marker: 'hideout' },
-      { text: 'Grab the stash and get clear', marker: 'hideout' },
+      { kind: 'pickup', target: () => ({ ...MARKERS.pier }), text: 'Pick up the package at the pier', hint: 'Walk over the orange crate' },
+      { kind: 'deliver', target: () => ({ ...MARKERS.northTower }), wanted: 3, text: 'Deliver it to the North Tower', hint: '3 stars — keep moving' },
+    ],
+  },
+  {
+    name: 'Night Market',
+    payout: PAYOUTS[3], rp: MISSION_RP[3],
+    unlockSmg: true,
+    dialogue: { name: 'MIRA KESANG', text: 'The market crew wants a cut. Clear the aisles and the SMG is yours.' },
+    stages: [
+      { kind: 'reach', target: () => ({ ...MARKERS.market }), text: 'Get to the Night Market', hint: 'On foot or by car' },
+      { kind: 'thugs', target: () => ({ ...MARKERS.market }), text: 'Clear the aisles — drop all 4 thugs', hint: 'Punch or shoot; they swing back' },
+    ],
+  },
+  {
+    name: 'Street Race',
+    payout: PAYOUTS[4], rp: MISSION_RP[4],
+    dialogue: { name: 'MIRA KESANG', text: "The rival's at the start line. Beat him to the pier or walk home." },
+    stages: [
+      { kind: 'race', target: () => ({ ...MARKERS.pier }), text: 'Beat the rival to the pier', hint: 'Pedal down — he will not wait' },
+    ],
+  },
+  {
+    name: 'Pier Intercept',
+    payout: PAYOUTS[5], rp: MISSION_RP[5],
+    dialogue: { name: 'MIRA KESANG', text: "The target's running for the pier. Ram him — the heli is already up." },
+    stages: [
+      { kind: 'ram', target: () => ({ ...MARKERS.pier }), wanted: 4, text: 'Wreck the target car before it reaches the pier', hint: 'Ram it or shoot it — the heli is watching' },
+    ],
+  },
+  {
+    name: 'Roadblock Breakout',
+    payout: PAYOUTS[6], rp: MISSION_RP[6],
+    dialogue: { name: 'MIRA KESANG', text: "They've blocked the road north. Go around, go through — just go." },
+    stages: [
+      { kind: 'reach', target: () => ({ ...MARKERS.northTower }), wanted: 3, text: 'Break through the roadblock and reach the North Tower', hint: '3 stars — go around or through' },
+    ],
+  },
+  {
+    name: 'Final Payday',
+    payout: PAYOUTS[7], rp: MISSION_RP[7],
+    dialogue: { name: 'MIRA KESANG', text: 'Last package, biggest score. Four stars, one heli, no mistakes.' },
+    stages: [
+      { kind: 'pickup', target: () => ({ ...MARKERS.pier }), text: 'Pick up the final package at the pier', hint: 'Last job — make it count' },
+      { kind: 'deliver', target: () => ({ ...MARKERS.beachfront }), wanted: 4, text: 'Deliver it to the beachfront', hint: '4 stars and a helicopter' },
     ],
   },
 ];
 
-/** Start (or restart) a mission: reset its stage and put its marker on the map. */
-export function startMission(state, index) {
-  state.missionIndex = index;
-  state.missionStage = 0;
-  state.missionDone = false;
-  const mission = MISSIONS[index];
-  state.message = { text: `${mission.name} — ${mission.intro}`, until: state.time + 5 };
-  if (index === 1) {
-    // The gold coupe appears for the Getaway.
-    const spot = state.city.goldCarSpot;
-    const gold = makeGoldCar(spot.x, spot.y);
-    state.cars.push(gold);
-    state.goldCar = gold;
-  }
-  if (index === 2) {
-    spawnGuards(state);
-  }
+export function createMissions() {
+  return {
+    index: 0, // 0..7, or 8 when the story is done
+    stage: 0,
+    hasPackage: false,
+    earned: 0,
+    rpEarned: 0,
+    done: false,
+    stageStarted: false, // current stage's entry effects applied?
+  };
 }
 
-function spawnGuards(state) {
-  const h = state.city.hideout;
-  state.guards = [
-    { x: h.x - 60, y: h.y - 40, hp: 100, angle: 0, shootTimer: 1, alive: true },
-    { x: h.x + 70, y: h.y + 30, hp: 100, angle: 0, shootTimer: 1.6, alive: true },
-    { x: h.x + 10, y: h.y - 90, hp: 100, angle: 0, shootTimer: 0.8, alive: true },
-  ];
+export function currentMission(m) {
+  if (m.done || m.index >= MISSION_DEFS.length) return null;
+  return MISSION_DEFS[m.index];
 }
 
-/** Where the current objective marker sits, or null when between missions. */
-export function currentMarker(state) {
-  if (state.missionIndex >= MISSIONS.length) return null;
-  const mission = MISSIONS[state.missionIndex];
-  const stage = mission.stages[state.missionStage];
-  if (!stage) return null;
-  if (stage.marker === 'goldCarSpot' && state.goldCar) {
-    return { x: state.goldCar.x, y: state.goldCar.y, label: stage.text };
+export function currentStage(m) {
+  const def = currentMission(m);
+  if (!def) return null;
+  return def.stages[m.stage];
+}
+
+export function missionTarget(m) {
+  const def = currentMission(m);
+  const stage = currentStage(m);
+  if (!def || !stage || !stage.target) return null;
+  const t = stage.target();
+  return { x: t.x, y: t.y, label: t.label, name: def.name, text: stage.text, hint: stage.hint };
+}
+
+// For the HUD mission panel: name, stage x/y, objective, next line.
+export function missionPanel(m) {
+  const def = currentMission(m);
+  if (!def) return null;
+  const stage = currentStage(m);
+  const next = def.stages[m.stage + 1];
+  return {
+    index: m.index,
+    name: def.name,
+    stage: m.stage + 1,
+    stageTotal: def.stages.length,
+    text: stage ? stage.text : '',
+    hint: stage ? stage.hint : '',
+    next: next ? next.text : 'Finish the job',
+  };
+}
+
+function near(ctx, t, radius = 70) {
+  if (!t) return false;
+  return Math.hypot(ctx.x - t.x, ctx.y - t.y) < radius;
+}
+
+// ctx: { x, y, inCar, wanted, busted, thugsDown, thugsTotal,
+//        raceWon, raceLost, targetWrecked, targetEscaped, dt }
+// Events: payout | setWanted | pickedUp | storyComplete | busted |
+//         stageStart {kind, mission, stage} | dialogue | unlockSmg |
+//         raceLost | targetEscaped
+export function updateMissions(m, ctx, dt) {
+  void dt;
+  const events = [];
+  if (m.done) return events;
+  if (ctx.busted) {
+    events.push({ type: 'busted' });
+    return events;
   }
-  const place = state.city[stage.marker];
-  if (!place) return null;
-  return { x: place.x, y: place.y, label: stage.text };
-}
+  const def = currentMission(m);
+  const stage = currentStage(m);
+  if (!def || !stage) return events;
 
-/** The objective line the HUD shows. */
-export function currentObjective(state) {
-  if (state.missionIndex >= MISSIONS.length) {
-    return 'Free roam — the city is yours. Earn cash, dodge the law.';
-  }
-  const mission = MISSIONS[state.missionIndex];
-  const stage = mission.stages[state.missionStage];
-  return `${mission.name}: ${stage.text}`;
-}
-
-function advanceStage(state) {
-  const mission = MISSIONS[state.missionIndex];
-  state.missionStage += 1;
-  if (state.missionStage >= mission.stages.length) {
-    const payout = MISSION_PAYOUTS[state.missionIndex];
-    state.player.cash += payout;
-    state.message = { text: `${mission.name} complete — +$${payout}`, until: state.time + 4 };
-    state.sfx.missionComplete();
-    state.missionIndex += 1;
-    if (state.missionIndex >= MISSIONS.length) {
-      state.storyComplete = true;
-      state.message = { text: 'STORY COMPLETE — Vice Shores is yours.', until: state.time + 6 };
-    } else {
-      startMission(state, state.missionIndex);
+  // Stage entry effects, once: wanted level + spawn signal + dialogue.
+  if (!m.stageStarted) {
+    m.stageStarted = true;
+    events.push({ type: 'stageStart', kind: stage.kind, mission: m.index, stage: m.stage });
+    if (m.stage === 0 && m.index > 0) {
+      events.push({ type: 'dialogue', name: def.dialogue.name, text: def.dialogue.text });
     }
-  } else {
-    const next = mission.stages[state.missionStage];
-    state.message = { text: next.text, until: state.time + 3 };
+    if (stage.wanted) events.push({ type: 'setWanted', stars: stage.wanted });
   }
+
+  const t = stage.target ? stage.target() : null;
+  let complete = false;
+  if (stage.kind === 'steal') {
+    complete = !!ctx.inCar;
+  } else if (stage.kind === 'reach') {
+    complete = near(ctx, t);
+  } else if (stage.kind === 'reachInCar') {
+    complete = !!ctx.inCar && near(ctx, t);
+  } else if (stage.kind === 'pickup') {
+    if (near(ctx, t)) {
+      m.hasPackage = true;
+      events.push({ type: 'pickedUp' });
+      complete = true;
+    }
+  } else if (stage.kind === 'deliver') {
+    complete = m.hasPackage && near(ctx, t);
+  } else if (stage.kind === 'thugs') {
+    complete = (ctx.thugsTotal || 0) > 0 && (ctx.thugsDown || 0) >= ctx.thugsTotal;
+  } else if (stage.kind === 'race') {
+    if (ctx.raceWon) complete = true;
+    else if (ctx.raceLost) events.push({ type: 'raceLost' });
+  } else if (stage.kind === 'ram') {
+    if (ctx.targetWrecked) complete = true;
+    else if (ctx.targetEscaped) events.push({ type: 'targetEscaped' });
+  }
+
+  if (events.some((e) => e.type === 'raceLost' || e.type === 'targetEscaped')) {
+    return events; // world resets the race/target; stage stays current
+  }
+  if (!complete) return events;
+
+  // Advance a stage, or finish the mission.
+  m.stage += 1;
+  m.stageStarted = false;
+  if (m.stage < def.stages.length) return events;
+  m.earned += def.payout;
+  m.rpEarned += def.rp;
+  m.index += 1;
+  m.stage = 0;
+  m.hasPackage = false;
+  events.push({ type: 'payout', amount: def.payout, rp: def.rp });
+  if (def.unlockSmg) events.push({ type: 'unlockSmg' });
+  if (m.index >= MISSION_DEFS.length) {
+    m.done = true;
+    events.push({ type: 'storyComplete' });
+  }
+  return events;
 }
 
-/** Check the current objective against the player's position and actions. */
-export function updateMissions(state, dt) {
-  if (state.missionIndex >= MISSIONS.length) return;
-  const mission = MISSIONS[state.missionIndex];
-  const stage = mission.stages[state.missionStage];
-  if (!stage) return;
-  const player = state.player;
-  const marker = currentMarker(state);
-  if (state.missionIndex === 0) {
-    if (marker && Math.hypot(player.x - marker.x, player.y - marker.y) < 70) advanceStage(state);
-  } else if (state.missionIndex === 1) {
-    if (state.missionStage === 0) {
-      if (player.inCar && player.inCar.gold) {
-        advanceStage(state);
-        state.wanted = Math.max(state.wanted, 2);
-        state.wantedTimer = 9;
-      }
-    } else if (marker && state.wanted === 0 && Math.hypot(player.x - marker.x, player.y - marker.y) < 80) {
-      advanceStage(state);
-    }
-  } else if (state.missionIndex === 2) {
-    if (state.missionStage === 0) {
-      if (marker && Math.hypot(player.x - marker.x, player.y - marker.y) < 120) advanceStage(state);
-    } else if (state.missionStage === 1) {
-      const alive = state.guards.filter((g) => g.alive).length;
-      if (alive === 0) advanceStage(state);
-    } else if (state.missionStage === 2) {
-      if (marker && Math.hypot(player.x - marker.x, player.y - marker.y) < 90) advanceStage(state);
-    }
-  }
+// After a bust: the current mission restarts from its opening stage
+// (progress inside the mission is lost, completed missions stay done).
+export function resetCurrentMission(m) {
+  m.stage = 0;
+  m.hasPackage = false;
+  m.stageStarted = false;
 }

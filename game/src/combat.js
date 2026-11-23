@@ -1,175 +1,174 @@
-// Vice Shores — combat: bullets, the punch, guards who shoot back, and the
-// particles every hit throws off. Bullets are plain data; the world steps them.
-import { CAR_LENGTH } from './config.js';
-import { hitBuilding } from './city.js';
-import { scarePedestrians } from './traffic.js';
+// Vice Shores — combat: fists, pistol and SMG, bullets and damage.
+// Pure logic: bullets fly as data; the world passes in targets to hit.
+// Weapon slots: 1 fists (infinite), 2 pistol (12-round mag),
+// 3 SMG (30-round mag, unlocked after mission 4).
 
-/** Move bullets, test hits against buildings, cars, guards, cops and the player. */
-export function updateBullets(state, dt) {
-  const keep = [];
-  for (const b of state.bullets) {
-    b.x += b.vx * dt;
-    b.y += b.vy * dt;
-    b.life -= dt;
-    if (b.life <= 0) continue;
-    if (hitBuilding(state.city, b.x, b.y, 2)) {
-      addSparks(state, b.x, b.y, 4);
-      continue;
+import { GUN, SMG, PLAYER } from './config.js';
+import { knockPedDown } from './traffic.js';
+import { damageCar } from './cars.js';
+
+export const WEAPONS = {
+  fists: { slot: 1, name: 'FISTS', ammo: '∞', mag: Infinity },
+  pistol: { slot: 2, name: 'PISTOL', ammo: '12' },
+  smg: { slot: 3, name: 'SMG', ammo: '30' },
+};
+
+export function createCombat() {
+  return {
+    bullets: [], // {x, y, angle, travelled, damage}
+    weapon: 'fists',
+    mag: GUN.magSize,
+    reserve: GUN.reserveStart,
+    smgMag: SMG.magSize,
+    smgReserve: SMG.reserveStart,
+    smgUnlocked: false,
+    reloadTimer: 0,
+    fireCooldown: 0,
+    punchTimer: 0,
+    muzzleTimer: 0, // seconds of muzzle flash left to draw
+    muzzleX: 0,
+    muzzleY: 0,
+  };
+}
+
+export function weaponSpec(combat) {
+  return combat.weapon === 'smg' ? SMG : GUN;
+}
+
+export function switchWeapon(combat, weapon) {
+  if (weapon === 'smg' && !combat.smgUnlocked) return false;
+  if (weapon === 'fists' || weapon === 'pistol' || weapon === 'smg') {
+    combat.weapon = weapon;
+    combat.reloadTimer = 0;
+    return true;
+  }
+  return false;
+}
+
+export function canShoot(combat) {
+  if (combat.weapon === 'fists') return false;
+  const mag = combat.weapon === 'smg' ? combat.smgMag : combat.mag;
+  return mag > 0 && combat.reloadTimer <= 0 && combat.fireCooldown <= 0;
+}
+
+export function shoot(combat, x, y, angle) {
+  if (!canShoot(combat)) return false;
+  const spec = weaponSpec(combat);
+  combat.bullets.push({
+    x: x + Math.cos(angle) * 22,
+    y: y + Math.sin(angle) * 22,
+    angle,
+    travelled: 0,
+    damage: spec.bulletDamage,
+    range: spec.bulletRange,
+    speed: spec.bulletSpeed,
+  });
+  if (combat.weapon === 'smg') combat.smgMag -= 1;
+  else combat.mag -= 1;
+  combat.fireCooldown = spec.fireCooldown;
+  combat.muzzleTimer = 0.06;
+  combat.muzzleX = x + Math.cos(angle) * 26;
+  combat.muzzleY = y + Math.sin(angle) * 26;
+  return true;
+}
+
+export function startReload(combat) {
+  if (combat.weapon === 'fists' || combat.reloadTimer > 0) return false;
+  const mag = combat.weapon === 'smg' ? combat.smgMag : combat.mag;
+  const reserve = combat.weapon === 'smg' ? combat.smgReserve : combat.reserve;
+  const size = combat.weapon === 'smg' ? SMG.magSize : GUN.magSize;
+  if (mag >= size || reserve <= 0) return false;
+  combat.reloadTimer = weaponSpec(combat).reloadTime;
+  return true;
+}
+
+// Punch: damage + knock down peds in a short arc in front of the player.
+// Thugs take two punches. Returns { hits, downs }.
+export function punch(combat, px, py, facing, peds) {
+  if (combat.punchTimer > 0) return { hits: 0, downs: 0 };
+  combat.punchTimer = PLAYER.punchCooldown;
+  let hits = 0;
+  let downs = 0;
+  for (const ped of peds) {
+    if (ped.state === 'down') continue;
+    const d = Math.hypot(ped.x - px, ped.y - py);
+    if (d > PLAYER.punchRange) continue;
+    const a = Math.atan2(ped.y - py, ped.x - px);
+    let diff = Math.abs(a - facing) % (Math.PI * 2);
+    if (diff > Math.PI) diff = Math.PI * 2 - diff;
+    if (diff < Math.PI / 2.5) {
+      const res = knockPedDown(ped, 4, PLAYER.punchDamage);
+      hits += 1;
+      if (res === 'down') downs += 1;
     }
-    if (b.x < 0 || b.x > state.city.width || b.y < 0 || b.y > state.city.height) continue;
-    let consumed = false;
-    if (b.from === 'player') {
-      for (const guard of state.guards) {
-        if (!guard.alive) continue;
-        if (Math.hypot(guard.x - b.x, guard.y - b.y) < 18) {
-          guard.hp -= b.damage;
-          addSparks(state, b.x, b.y, 6);
-          if (guard.hp <= 0) {
-            guard.alive = false;
-            state.player.cash += 50;
-            state.message = { text: 'Guard down — +$50', until: state.time + 1.5 };
-          }
-          consumed = true;
+  }
+  return { hits, downs };
+}
+
+// Step timers and bullets. targets: { peds, policeCars, cars } — objects
+// with x/y and (for peds) a `state`, (for cars) `health`.
+// Returns hit events: [{type:'ped'|'car', target, x, y, down}].
+export function updateCombat(combat, dt, targets, city) {
+  if (combat.fireCooldown > 0) combat.fireCooldown -= dt;
+  if (combat.punchTimer > 0) combat.punchTimer -= dt;
+  if (combat.muzzleTimer > 0) combat.muzzleTimer -= dt;
+  if (combat.reloadTimer > 0) {
+    combat.reloadTimer -= dt;
+    if (combat.reloadTimer <= 0) {
+      if (combat.weapon === 'smg') {
+        const need = SMG.magSize - combat.smgMag;
+        const take = Math.min(need, combat.smgReserve);
+        combat.smgMag += take;
+        combat.smgReserve -= take;
+      } else {
+        const need = GUN.magSize - combat.mag;
+        const take = Math.min(need, combat.reserve);
+        combat.mag += take;
+        combat.reserve -= take;
+      }
+    }
+  }
+  const hits = [];
+  const kept = [];
+  for (const b of combat.bullets) {
+    b.x += Math.cos(b.angle) * b.speed * dt;
+    b.y += Math.sin(b.angle) * b.speed * dt;
+    b.travelled += b.speed * dt;
+    let dead = b.travelled > b.range
+      || b.x < 0 || b.x > city.w || b.y < 0 || b.y > city.h;
+    if (!dead) {
+      // Buildings stop bullets.
+      for (const bd of city.buildings) {
+        if (b.x >= bd.x && b.x <= bd.x + bd.w && b.y >= bd.y && b.y <= bd.y + bd.h) {
+          dead = true;
           break;
         }
       }
-      if (!consumed) {
-        for (const car of state.cars) {
-          if (car.driver === 'player') continue;
-          const dx = b.x - car.x;
-          const dy = b.y - car.y;
-          const along = Math.abs(dx * Math.cos(car.angle) + dy * Math.sin(car.angle));
-          const across = Math.abs(-dx * Math.sin(car.angle) + dy * Math.cos(car.angle));
-          if (along < CAR_LENGTH / 2 && across < 18) {
-            car.hp -= b.damage;
-            addSparks(state, b.x, b.y, 5);
-            consumed = true;
-            break;
-          }
+    }
+    if (!dead) {
+      for (const ped of targets.peds || []) {
+        if (ped.state === 'down') continue;
+        if (Math.hypot(ped.x - b.x, ped.y - b.y) < 16) {
+          const res = knockPedDown(ped, 5, b.damage);
+          hits.push({ type: 'ped', target: ped, x: b.x, y: b.y, down: res === 'down' });
+          dead = true;
+          break;
         }
       }
-      if (!consumed) {
-        for (const ped of state.peds) {
-          if (ped.downTimer > 0) continue;
-          if (Math.hypot(ped.x - b.x, ped.y - b.y) < 14) {
-            ped.downTimer = 6;
-            scarePedestrians(state.peds, b.x, b.y, 300);
-            consumed = true;
-            break;
-          }
+    }
+    if (!dead) {
+      for (const car of [...(targets.policeCars || []), ...(targets.cars || [])]) {
+        if (car.wrecked) continue;
+        if (Math.hypot(car.x - b.x, car.y - b.y) < 22) {
+          const wrecked = damageCar(car, b.damage);
+          hits.push({ type: 'car', target: car, x: b.x, y: b.y, down: wrecked });
+          dead = true;
+          break;
         }
       }
-    } else if (b.from === 'guard') {
-      const player = state.player;
-      if (!player.inCar && Math.hypot(player.x - b.x, player.y - b.y) < 16 && player.invulnerable <= 0) {
-        player.hp -= b.damage;
-        player.invulnerable = 0.5;
-        state.shake = 0.5;
-        consumed = true;
-      } else if (player.inCar && Math.hypot(player.inCar.x - b.x, player.inCar.y - b.y) < 30) {
-        player.inCar.hp -= b.damage;
-        consumed = true;
-      }
     }
-    if (!consumed) keep.push(b);
+    if (!dead) kept.push(b);
   }
-  state.bullets = keep;
-}
-
-/** Guards aim at the player and fire when close enough. */
-export function updateGuards(state, dt) {
-  for (const guard of state.guards) {
-    if (!guard.alive) continue;
-    const dx = state.player.x - guard.x;
-    const dy = state.player.y - guard.y;
-    const dist = Math.hypot(dx, dy);
-    guard.angle = Math.atan2(dy, dx);
-    guard.shootTimer -= dt;
-    if (dist < 460 && guard.shootTimer <= 0) {
-      guard.shootTimer = 1.3;
-      const angle = guard.angle + (Math.random() - 0.5) * 0.12;
-      state.bullets.push({
-        x: guard.x + Math.cos(angle) * 22,
-        y: guard.y + Math.sin(angle) * 22,
-        vx: Math.cos(angle) * 620,
-        vy: Math.sin(angle) * 620,
-        life: 1.1,
-        from: 'guard',
-        damage: 12,
-      });
-      state.sfx.enemyShot();
-    }
-  }
-}
-
-/** Apply a punch hitbox: guards, pedestrians and cops in the arc take the hit. */
-export function applyPunch(state, punch) {
-  let hitAnything = false;
-  for (const guard of state.guards) {
-    if (!guard.alive) continue;
-    if (Math.hypot(guard.x - punch.x, guard.y - punch.y) < punch.r + 14) {
-      guard.hp -= punch.damage;
-      if (guard.hp <= 0) {
-        guard.alive = false;
-        state.player.cash += 50;
-      }
-      hitAnything = true;
-    }
-  }
-  for (const ped of state.peds) {
-    if (ped.downTimer > 0) continue;
-    if (Math.hypot(ped.x - punch.x, ped.y - punch.y) < punch.r + 10) {
-      ped.downTimer = 6;
-      scarePedestrians(state.peds, punch.x, punch.y, 260);
-      hitAnything = true;
-    }
-  }
-  if (hitAnything) addSparks(state, punch.x, punch.y, 8);
-  return hitAnything;
-}
-
-/** A burst of sparks at (x, y). */
-export function addSparks(state, x, y, count) {
-  for (let i = 0; i < count; i += 1) {
-    const angle = Math.random() * Math.PI * 2;
-    const speed = 60 + Math.random() * 180;
-    state.particles.push({
-      x, y,
-      vx: Math.cos(angle) * speed,
-      vy: Math.sin(angle) * speed,
-      life: 0.35 + Math.random() * 0.3,
-      maxLife: 0.65,
-      color: '#ffd76a',
-      size: 2 + Math.random() * 2,
-    });
-  }
-}
-
-/** Smoke puff from a wrecked car. */
-export function addSmoke(state, x, y) {
-  state.particles.push({
-    x: x + (Math.random() - 0.5) * 20,
-    y: y + (Math.random() - 0.5) * 20,
-    vx: (Math.random() - 0.5) * 20,
-    vy: -30 - Math.random() * 30,
-    life: 1.2,
-    maxLife: 1.2,
-    color: '#555555',
-    size: 7 + Math.random() * 6,
-  });
-}
-
-/** Step every particle; drop the dead ones. */
-export function updateParticles(state, dt) {
-  for (const p of state.particles) {
-    p.x += p.vx * dt;
-    p.y += p.vy * dt;
-    p.vx *= 0.96;
-    p.vy *= 0.96;
-    p.life -= dt;
-  }
-  state.particles = state.particles.filter((p) => p.life > 0);
-  // Skid marks fade slowly.
-  for (const s of state.skids) s.life -= dt * 0.25;
-  state.skids = state.skids.filter((s) => s.life > 0);
+  combat.bullets = kept;
+  return hits;
 }

@@ -1,9 +1,8 @@
-// Seeded random numbers (mulberry32). Every deterministic scene — screenshots, the
-// staged missions, the autopilot — draws from one of these, so the same seed always
-// rebuilds the same city and the same frame.
-export function makeRng(seed) {
+// Vice Shores — small deterministic RNG (mulberry32) and math helpers.
+
+export function mulberry32(seed) {
   let a = seed >>> 0;
-  return function nextRandom() {
+  return function next() {
     a |= 0;
     a = (a + 0x6d2b79f5) | 0;
     let t = Math.imul(a ^ (a >>> 15), 1 | a);
@@ -12,23 +11,51 @@ export function makeRng(seed) {
   };
 }
 
-/** Integer in [min, max]. */
-export function randomInt(rng, min, max) {
-  return min + Math.floor(rng() * (max - min + 1));
+// Deterministic 0..1 hash of two integers — stable speckles, palms, etc.
+export function hash2(x, y) {
+  let h = (x * 374761393 + y * 668265263) | 0;
+  h = Math.imul(h ^ (h >>> 13), 1274126177);
+  return (((h ^ (h >>> 16)) >>> 0) % 10000) / 10000;
 }
 
-/** One item from an array. */
-export function pickFrom(rng, items) {
-  return items[Math.floor(rng() * items.length)];
+export function rand(rng, a, b) {
+  return a + rng() * (b - a);
 }
 
-/** Fisher-Yates shuffle, in place, driven by the seeded rng. */
-export function shuffleWith(rng, items) {
-  for (let i = items.length - 1; i > 0; i -= 1) {
-    const j = Math.floor(rng() * (i + 1));
-    const tmp = items[i];
-    items[i] = items[j];
-    items[j] = tmp;
-  }
-  return items;
+export function randInt(rng, a, b) {
+  return Math.floor(rand(rng, a, b + 1));
+}
+
+export function pick(rng, arr) {
+  return arr[Math.floor(rng() * arr.length)];
+}
+
+export function chance(rng, p) {
+  return rng() < p;
+}
+
+export function clamp(v, a, b) {
+  return v < a ? a : v > b ? b : v;
+}
+
+export function lerp(a, b, t) {
+  return a + (b - a) * t;
+}
+
+export function dist(ax, ay, bx, by) {
+  const dx = bx - ax;
+  const dy = by - ay;
+  return Math.sqrt(dx * dx + dy * dy);
+}
+
+export function angleTo(ax, ay, bx, by) {
+  return Math.atan2(by - ay, bx - ax);
+}
+
+// Shortest signed turn from `from` toward `to`, in (-PI, PI].
+export function angleDelta(from, to) {
+  let d = (to - from) % (Math.PI * 2);
+  if (d > Math.PI) d -= Math.PI * 2;
+  if (d <= -Math.PI) d += Math.PI * 2;
+  return d;
 }

@@ -1,130 +1,197 @@
-// Vice Shores — the entry point: the canvas, the game loop, the screens (title,
-// play, pause, busted, wasted) and the deterministic screenshot mode behind
-// ?shot=chase|street|beach|title&seed=N.
-import { createWorld, stepWorld, computeCamera } from './world.js';
-import { drawGame, drawTitleScreen, drawPauseScreen, drawEndScreen } from './render.js';
-import { Input } from './input.js';
+// Vice Shores — game loop and screen state machine.
+// Screens: title -> playing <-> paused, busted, wasted, complete.
+// With ?shot=<name>&seed=<n> in the URL, renders exactly one staged frame
+// (for screenshots) and sets window.__shotReady.
+
+import { createWorld, updateWorld } from './world.js';
+import { createInput, attachInput, endFrame, wasPressed } from './input.js';
+import { createAudio } from './audio.js';
+import { loadSave, saveGame } from './save.js';
+import { renderWorld, drawTitleScreen, drawOverlay } from './render.js';
+import { drawHUD } from './hud.js';
+import { drawMinimap } from './minimap.js';
 import { stageShot } from './shots.js';
-import { saveGame, loadSave, applySave } from './save.js';
-import { startMission } from './missions.js';
+import { MARKERS } from './config.js';
+
+const VIEW_W = 1280;
+const VIEW_H = 720;
 
 const canvas = document.getElementById('game');
 const ctx = canvas.getContext('2d');
-const statusLine = document.getElementById('status');
+
+const save = loadSave();
+const audio = createAudio();
+audio.setMuted(save.muted);
+
+const input = createInput();
+attachInput(input, canvas);
+
 const params = new URLSearchParams(window.location.search);
 const shotName = params.get('shot');
-const seed = Number(params.get('seed') || '1') || 1;
+const shotSeed = Number(params.get('seed') || '1');
 
-function resizeCanvas() {
-  canvas.width = window.innerWidth;
-  canvas.height = window.innerHeight;
+const world = createWorld(shotSeed || 1337);
+world.player.money = save.money;
+world.player.rp = save.rp;
+world.combat.smgUnlocked = save.smgUnlocked;
+world.missions.index = Math.min(save.missionIndex, 7);
+world.input = input;
+
+let screen = 'title'; // 'title' | 'playing' | 'paused' | 'busted' | 'wasted' | 'complete'
+let lastTime = performance.now();
+let saveTimer = 0;
+
+function persist() {
+  save.money = world.player.money;
+  save.missionIndex = world.missions.done ? 8 : world.missions.index;
+  save.bestScore = Math.max(save.bestScore, world.player.money + world.missions.earned);
+  save.muted = audio.muted;
+  save.rp = world.player.rp;
+  save.smgUnlocked = world.combat.smgUnlocked;
+  saveGame(save);
 }
-window.addEventListener('resize', resizeCanvas);
-resizeCanvas();
 
-function announce(text) {
-  if (statusLine) statusLine.textContent = text;
+function drainEvents() {
+  for (const e of world.events) {
+    if (e.type === 'busted') {
+      screen = 'busted';
+      audio.busted();
+      persist();
+    } else if (e.type === 'wasted') {
+      screen = 'wasted';
+      persist();
+    } else if (e.type === 'storyComplete') {
+      screen = 'complete';
+      audio.chime();
+      persist();
+    } else if (e.type === 'payout') {
+      audio.chime();
+      persist();
+    } else if (e.type === 'shot') {
+      audio.gunshot();
+    } else if (e.type === 'crime' && e.kind === 'punch') {
+      audio.punch();
+    } else if (e.type === 'radio') {
+      audio.station();
+    } else if (e.type === 'ability' || e.type === 'garage' || e.type === 'pickup') {
+      audio.pickup();
+    } else if (e.type === 'unlockSmg') {
+      audio.chime();
+    } else if (e.type === 'ramHit' || e.type === 'crash') {
+      audio.punch();
+    }
+  }
+  world.events.length = 0;
+}
+
+function renderPlaying() {
+  // renderWorld draws in world coordinates: translate by the camera so
+  // the view window lands on the 1280x720 canvas, then HUD in screen space.
+  ctx.save();
+  ctx.translate(-world.camera.x, -world.camera.y);
+  renderWorld(ctx, world);
+  ctx.restore();
+  drawMinimap(ctx, world, VIEW_W, VIEW_H);
+  drawHUD(ctx, world, VIEW_W, VIEW_H);
+}
+
+function frame(now) {
+  const dt = Math.min(0.05, (now - lastTime) / 1000);
+  lastTime = now;
+
+  // Mute toggle works on every screen.
+  if (wasPressed(input, 'KeyM')) {
+    const muted = audio.toggleMute();
+    save.muted = muted;
+    saveGame(save);
+  }
+
+  if (screen === 'title') {
+    drawTitleScreen(ctx, VIEW_W, VIEW_H, now / 1000, save.bestScore);
+    if (wasPressed(input, 'Enter')) {
+      audio.unlock();
+      screen = 'playing';
+    }
+  } else if (screen === 'playing') {
+    if (wasPressed(input, 'Escape') || wasPressed(input, 'KeyP')) {
+      screen = 'paused';
+    } else {
+      updateWorld(world, input, dt);
+      drainEvents();
+      // Engine + siren follow the world.
+      audio.engine(world.player.car ? Math.abs(world.player.car.speed) / 560 : 0, !world.player.onFoot);
+      audio.siren(dt, world.wanted.stars);
+      saveTimer += dt;
+      if (saveTimer > 10) {
+        saveTimer = 0;
+        persist();
+      }
+    }
+    renderPlaying();
+    if (screen === 'paused') {
+      drawOverlay(ctx, VIEW_W, VIEW_H, 'PAUSED', ['Take a breather. The city waits.']);
+    }
+  } else if (screen === 'paused') {
+    renderPlaying();
+    drawOverlay(ctx, VIEW_W, VIEW_H, 'PAUSED', ['Take a breather. The city waits.']);
+    if (wasPressed(input, 'Escape') || wasPressed(input, 'KeyP') || wasPressed(input, 'Enter')) {
+      screen = 'playing';
+    }
+  } else if (screen === 'busted') {
+    renderPlaying();
+    drawOverlay(ctx, VIEW_W, VIEW_H, 'BUSTED', [
+      'The cops caught you on foot.',
+      'Fine paid. Mission progress lost. Wanted cleared.',
+    ], '#ff5e57');
+    if (wasPressed(input, 'Enter')) screen = 'playing';
+  } else if (screen === 'wasted') {
+    renderPlaying();
+    drawOverlay(ctx, VIEW_W, VIEW_H, 'WASTED', [
+      'You ran out of health.',
+      'You wake up at the hideout, patched up.',
+    ], '#ff5e57');
+    if (wasPressed(input, 'Enter')) {
+      world.player.health = 100;
+      world.player.x = MARKERS.hideout.x;
+      world.player.y = MARKERS.hideout.y;
+      world.player.onFoot = true;
+      world.player.car = null;
+      world.wanted.stars = 0;
+      world.wanted.quietTimer = 0;
+      screen = 'playing';
+    }
+  } else if (screen === 'complete') {
+    renderPlaying();
+    drawOverlay(ctx, VIEW_W, VIEW_H, 'STORY COMPLETE', [
+      `You ran all eight missions and banked $${world.missions.earned}.`,
+      `Total cash: $${world.player.money} · Respect: ${world.player.rp} RP. Vice Shores is yours.`,
+    ], '#ffd23f');
+    if (wasPressed(input, 'Enter')) screen = 'playing';
+  }
+
+  endFrame(input);
+  requestAnimationFrame(frame);
 }
 
 if (shotName) {
-  // Screenshot mode: stage one deterministic scene, draw it, and say so.
-  const shotWorld = createWorld(seed);
-  const screen = stageShot(shotName, shotWorld);
-  shotWorld.screen = screen;
-  computeCamera(shotWorld, canvas.width, canvas.height);
-  if (screen === 'title') {
-    drawGame(ctx, shotWorld, canvas.width, canvas.height, false);
-    drawTitleScreen(ctx, shotWorld, canvas.width, canvas.height);
-  } else {
-    drawGame(ctx, shotWorld, canvas.width, canvas.height);
-  }
-  window.__ready = true;
-} else {
-  const world = createWorld((Date.now() % 100000) | 0);
-  const input = new Input(canvas);
-  world.best = (loadSave() || {}).best || 0;
-  let lastTime = performance.now();
-  let firstFrame = true;
-
-  function startNewGame() {
-    const fresh = createWorld((Date.now() % 100000) | 0);
-    fresh.best = world.best;
-    Object.keys(world).forEach((key) => { delete world[key]; });
-    Object.assign(world, fresh);
-    world.screen = 'play';
-    announce('Vice Shores — mission 1: The Courier.');
-  }
-
-  function continueSavedGame() {
-    const data = loadSave();
-    if (!data) return false;
-    startNewGame();
-    applySave(world, data);
-    startMission(world, world.missionIndex);
-    world.screen = 'play';
-    announce('Vice Shores — your saved game continues.');
-    return true;
-  }
-
-  window.addEventListener('keydown', (event) => {
-    world.sfx.unlock();
-    if (event.code === 'Enter') {
-      if (world.screen === 'title') startNewGame();
-      else if (world.screen === 'busted' || world.screen === 'wasted') startNewGame();
-      else if (world.screen === 'pause') world.screen = 'play';
-    }
-    if (event.code === 'KeyL' && (world.screen === 'title' || world.screen === 'pause')) {
-      if (!continueSavedGame()) {
-        world.message = { text: 'No saved game yet.', until: world.time + 2 };
-      }
-    }
-    if ((event.code === 'Escape' || event.code === 'KeyP') && world.screen === 'play') {
-      world.screen = 'pause';
-      announce('Paused.');
-    } else if ((event.code === 'Escape' || event.code === 'KeyP') && world.screen === 'pause') {
-      world.screen = 'play';
-    }
-    if (world.screen === 'pause') {
-      if (event.code === 'KeyS') {
-        saveGame(world);
-        world.message = { text: 'Game saved.', until: world.time + 2 };
-      }
-      if (event.code === 'KeyT') {
-        startMission(world, world.missionIndex);
-        world.screen = 'play';
-      }
-      if (event.code === 'KeyQ') {
-        world.screen = 'title';
-      }
-    }
-  });
-  canvas.addEventListener('mousedown', () => world.sfx.unlock());
-
-  function frame(now) {
-    const dt = Math.min(0.05, (now - lastTime) / 1000 || 0.016);
-    lastTime = now;
-    if (world.screen === 'play') {
-      stepWorld(world, input, dt);
-      input.endFrame();
-    }
-    computeCamera(world, canvas.width, canvas.height);
-    if (world.screen === 'title') {
-      drawGame(ctx, world, canvas.width, canvas.height, false);
-      drawTitleScreen(ctx, world, canvas.width, canvas.height);
-    } else if (world.screen === 'pause') {
-      drawGame(ctx, world, canvas.width, canvas.height);
-      drawPauseScreen(ctx, world, canvas.width, canvas.height);
-    } else if (world.screen === 'busted' || world.screen === 'wasted') {
-      drawGame(ctx, world, canvas.width, canvas.height);
-      drawEndScreen(ctx, world, canvas.width, canvas.height);
+  // Screenshot mode: stage the scene, render one frame, stop.
+  try {
+    stageShot(world, shotName);
+    // Park the crosshair near the player so on-foot shots read naturally.
+    input.mouse.x = 700;
+    input.mouse.y = 300;
+    if (shotName === 'title') {
+      drawTitleScreen(ctx, VIEW_W, VIEW_H, 12.5, save.bestScore);
     } else {
-      drawGame(ctx, world, canvas.width, canvas.height);
+      renderPlaying();
     }
-    if (firstFrame) {
-      firstFrame = false;
-      window.__ready = true;
-    }
-    requestAnimationFrame(frame);
+  } catch (err) {
+    document.title = `SHOT ERROR: ${err.message}`;
+    throw err;
   }
+  window.__shotReady = true;
+} else {
+  // Expose a handle for debugging / playtesting.
+  window.__viceShores = { world, input, audio };
   requestAnimationFrame(frame);
 }

@@ -1,52 +1,68 @@
-// Vice Shores — save and load. One small JSON object in localStorage: cash, the
-// mission, the player's place and health, the clock and the best cash earned.
-import { SAVE_KEY } from './config.js';
+// Vice Shores — localStorage save/load with an in-memory fallback,
+// so the game also runs (and tests) where storage is unavailable.
+// Now also persists respect (RP) and the SMG unlock.
 
-/** Write the current run to localStorage. */
-export function saveGame(state) {
+const KEY = 'vice-shores-save-v1';
+
+export function defaultSave() {
+  return { money: 0, missionIndex: 0, bestScore: 0, muted: false, rp: 0, smgUnlocked: false };
+}
+
+function store() {
   try {
-    const data = {
-      cash: state.player.cash,
-      missionIndex: state.missionIndex,
-      x: Math.round(state.player.x),
-      y: Math.round(state.player.y),
-      hp: Math.round(state.player.hp),
-      ammo: state.player.ammo,
-      timeOfDay: state.timeOfDay,
-      best: Math.max(state.best || 0, state.player.cash),
-      savedAt: Date.now(),
-    };
-    window.localStorage.setItem(SAVE_KEY, JSON.stringify(data));
+    if (typeof globalThis.localStorage !== 'undefined' && globalThis.localStorage) {
+      return globalThis.localStorage;
+    }
+  } catch {
+    // Storage blocked (private mode, sandbox): fall through to memory.
+  }
+  if (!globalThis.__viceShoresMemoryStore) {
+    globalThis.__viceShoresMemoryStore = Object.create(null);
+  }
+  const mem = globalThis.__viceShoresMemoryStore;
+  return {
+    getItem: (k) => (k in mem ? mem[k] : null),
+    setItem: (k, v) => { mem[k] = String(v); },
+    removeItem: (k) => { delete mem[k]; },
+  };
+}
+
+export function loadSave() {
+  try {
+    const raw = store().getItem(KEY);
+    if (!raw) return defaultSave();
+    const parsed = JSON.parse(raw);
+    const save = defaultSave();
+    if (typeof parsed.money === 'number') save.money = Math.max(0, Math.floor(parsed.money));
+    if (typeof parsed.missionIndex === 'number') {
+      save.missionIndex = Math.max(0, Math.min(8, Math.floor(parsed.missionIndex)));
+    }
+    if (typeof parsed.bestScore === 'number') save.bestScore = Math.max(0, Math.floor(parsed.bestScore));
+    if (typeof parsed.muted === 'boolean') save.muted = parsed.muted;
+    if (typeof parsed.rp === 'number') save.rp = Math.max(0, Math.floor(parsed.rp));
+    if (typeof parsed.smgUnlocked === 'boolean') save.smgUnlocked = parsed.smgUnlocked;
+    return save;
+  } catch {
+    return defaultSave();
+  }
+}
+
+export function saveGame(save) {
+  try {
+    store().setItem(KEY, JSON.stringify({
+      money: save.money | 0,
+      missionIndex: save.missionIndex | 0,
+      bestScore: save.bestScore | 0,
+      muted: !!save.muted,
+      rp: save.rp | 0,
+      smgUnlocked: !!save.smgUnlocked,
+    }));
     return true;
-  } catch (error) {
+  } catch {
     return false;
   }
 }
 
-/** Read the save back, or null when there is none. */
-export function loadSave() {
-  try {
-    const raw = window.localStorage.getItem(SAVE_KEY);
-    if (!raw) return null;
-    const data = JSON.parse(raw);
-    if (typeof data.cash !== 'number' || typeof data.x !== 'number') return null;
-    return data;
-  } catch (error) {
-    return null;
-  }
-}
-
-/** Apply a loaded save to a fresh world state. */
-export function applySave(state, data) {
-  state.player.cash = data.cash;
-  state.player.x = data.x;
-  state.player.y = data.y;
-  state.player.hp = data.hp;
-  state.player.ammo = data.ammo;
-  state.timeOfDay = data.timeOfDay || 10;
-  state.best = data.best || 0;
-  state.missionIndex = Math.min(data.missionIndex || 0, 2);
-  state.missionStage = 0;
-  state.wanted = 0;
-  state.cops = [];
+export function clearSave() {
+  try { store().removeItem(KEY); } catch { /* ignore */ }
 }

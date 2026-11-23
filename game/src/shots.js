@@ -1,155 +1,172 @@
-// Vice Shores — the screenshot scenes behind ?shot=chase|street|beach|title.
-// Each one plays the real rules forward from a fresh world for a fixed number of
-// steps, steered by a simple autopilot, so the frame is what a short game really
-// looks like and the same seed always stages the same scene.
-import { ROADS_HORIZONTAL, ROADS_VERTICAL } from './config.js';
-import { nearestRoad } from './city.js';
-import { enterCar } from './player.js';
-import { makePoliceCar } from './cars.js';
-import { startMission } from './missions.js';
-import { scarePedestrians } from './traffic.js';
-import { stepWorld, computeCamera } from './world.js';
-import { makeScriptedInput } from './input.js';
+// Vice Shores — deterministic screenshot staging.
+// Given a shot name (from shots.json) and a seed, arrange a fixed scene
+// in the world and let main.js render exactly one frame of it.
+// No randomness here that is not seeded: the same shot always looks same.
+// The chase shot is the late-game money shot: 4 stars, helicopter
+// overhead, roadblock ahead, dense HUD with big money and rank.
 
-const STEP = 1 / 60;
+import { MARKERS } from './config.js';
+import { createCar } from './cars.js';
+import { setWanted, updateHelicopter, spawnRoadblock } from './police.js';
+import { spawnThugs } from './traffic.js';
 
-/** Autopilot: drive along the road toward the mission marker. */
-function driveAutopilot(state) {
-  const input = makeScriptedInput({ up: true });
-  const car = state.player.inCar;
-  if (!car) return input;
-  const road = nearestRoad(car.x, car.y);
-  const forward = { x: Math.cos(car.angle), y: Math.sin(car.angle) };
-  const right = { x: -forward.y, y: forward.x };
-  let targetX = car.x;
-  let targetY = car.y;
-  if (road.axis === 'v') {
-    targetX = road.at + (Math.sin(car.angle) > 0 ? 24 : -24);
-    targetY = car.y + Math.sin(car.angle) * 100;
-  } else {
-    targetX = car.x + Math.cos(car.angle) * 100;
-    targetY = road.at + (Math.cos(car.angle) > 0 ? 24 : -24);
-  }
-  const toTarget = { x: targetX - car.x, y: targetY - car.y };
-  const cross = forward.x * toTarget.y - forward.y * toTarget.x;
-  input.left = cross < -20;
-  input.right = cross > 20;
-  return input;
+export const SHOT_NAMES = ['chase', 'street', 'beach', 'title'];
+
+function centreCamera(world, p) {
+  world.camera.x = Math.max(0, Math.min(3200 - 1280, p.x - 640));
+  world.camera.y = Math.max(0, Math.min(2400 - 720, p.y - 360));
 }
 
-/** Walk autopilot: stroll toward the mission marker. */
-function walkAutopilot(state, marker) {
-  const input = makeScriptedInput();
-  if (!marker) return input;
-  const dx = marker.x - state.player.x;
-  const dy = marker.y - state.player.y;
-  input.right = dx > 30;
-  input.left = dx < -30;
-  input.down = dy > 30;
-  input.up = dy < -30;
-  return input;
+// Player in a car on the vertical road x=1280, heading south at speed,
+// two police cars closing in, helicopter overhead, roadblock ahead.
+function stageChase(world) {
+  const p = world.player;
+  // Late-game HUD numbers, like a real playthrough.
+  p.money = 18450;
+  p.rp = 1675;
+  p.health = 82;
+  p.armour = 45;
+  // Mission 6 (Pier Intercept) so the panel reads "MISSION 6".
+  world.missions.index = 5;
+  world.missions.stage = 0;
+  world.missions.stageStarted = true;
+  world.missions.hasPackage = false;
+  // Player car — gold, so it reads as the hero car.
+  const car = world.traffic.aiCars[0];
+  car.x = 1280;
+  car.y = 1100;
+  car.angle = Math.PI / 2; // south
+  car.speed = 360;
+  car.owner = 'player';
+  car.color = '#e8c33a';
+  car.name = 'RUKAN PELO GT';
+  car.health = 74;
+  p.car = car;
+  p.onFoot = false;
+  p.x = car.x;
+  p.y = car.y;
+  p.angle = car.angle;
+  // Two police cars behind.
+  world.police.cars = [];
+  const cop1 = createCar(1266, 980, Math.PI / 2, '#1f6feb', { kind: 'police', id: 901, callsign: 'CORAL-48', role: 'RAMMING' });
+  cop1.speed = 420;
+  const cop2 = createCar(1300, 900, Math.PI / 2, '#1f6feb', { kind: 'police', id: 902, callsign: 'REEF-12', role: 'FLANKING' });
+  cop2.speed = 430;
+  world.police.cars.push(cop1, cop2);
+  setWanted(world.wanted, 4);
+  // Roadblock across the road ahead (above the dialogue box, in frame).
+  spawnRoadblock(world.police, 1280, 1420, 0);
+  // Helicopter circling overhead with the searchlight on the player.
+  world.heli.orbit = 0.9;
+  updateHelicopter(world.heli, world.wanted, p, 0.0);
+  // Traffic ahead for depth.
+  world.traffic.aiCars[1].x = 1294;
+  world.traffic.aiCars[1].y = 1240;
+  world.traffic.aiCars[1].angle = Math.PI / 2;
+  world.traffic.aiCars[1].speed = 150;
+  world.traffic.aiCars[2].x = 1654;
+  world.traffic.aiCars[2].y = 1000;
+  world.traffic.aiCars[2].angle = Math.PI / 2;
+  world.traffic.aiCars[2].speed = 150;
+  // Target car ahead (mission 6) — the purple dot on the minimap.
+  const target = createCar(1290, 1330, Math.PI / 2, '#8e44ad', { kind: 'target', id: 801, name: 'DUST DEVIL' });
+  target.speed = 260;
+  world.target = { car: target, waypoints: [], wp: 0, arrived: false };
+  // A few exhaust puffs behind the player car for motion.
+  world.particles.push(
+    { x: 1280, y: 1060, vx: -10, vy: -30, life: 0.6, maxLife: 0.7, size: 8, color: 'rgba(180,180,180,0.45)', grow: 14 },
+    { x: 1272, y: 1030, vx: -8, vy: -24, life: 0.4, maxLife: 0.7, size: 10, color: 'rgba(180,180,180,0.45)', grow: 14 },
+  );
+  // Camera pulled a little south so the roadblock ahead is in frame.
+  world.camera.x = Math.max(0, Math.min(3200 - 1280, p.x - 640));
+  world.camera.y = Math.max(0, Math.min(2400 - 720, p.y - 360 + 120));
+  world.message = '';
+  world.messageTimer = 0;
 }
 
-/** Put a police car on the road behind the player, already in pursuit. */
-function addChaser(state, dx, dy) {
-  const car = makePoliceCar(state.player.x + dx, state.player.y + dy);
-  car.angle = Math.atan2(-dy, -dx);
-  state.cars.push(car);
-  return car;
+// Night Market, mission 4 stage 2: player on foot among the thugs,
+// traffic passing the intersection, peds on the sidewalks.
+function stageStreet(world) {
+  const p = world.player;
+  p.money = 8200;
+  p.rp = 950;
+  p.health = 100;
+  p.armour = 0;
+  world.missions.index = 3;
+  world.missions.stage = 1;
+  world.missions.stageStarted = true;
+  world.missions.hasPackage = false;
+  world.thugs = spawnThugs(MARKERS.market.x, MARKERS.market.y);
+  p.x = 1560;
+  p.y = 1280;
+  p.onFoot = true;
+  p.car = null;
+  p.angle = Math.PI / 4;
+  setWanted(world.wanted, 1);
+  world.police.cars = [];
+  const cop = createCar(1500, 1080, Math.PI / 2, '#1f6feb', { kind: 'police', id: 901, callsign: 'PALM-7', role: 'PURSUIT' });
+  cop.speed = 380;
+  world.police.cars.push(cop);
+  // Traffic crossing the intersection both ways.
+  world.traffic.aiCars[0].x = 1100;
+  world.traffic.aiCars[0].y = 1266;
+  world.traffic.aiCars[0].angle = 0;
+  world.traffic.aiCars[0].speed = 150;
+  world.traffic.aiCars[1].x = 1900;
+  world.traffic.aiCars[1].y = 1294;
+  world.traffic.aiCars[1].angle = Math.PI;
+  world.traffic.aiCars[1].speed = 150;
+  world.traffic.aiCars[2].x = 1266;
+  world.traffic.aiCars[2].y = 1000;
+  world.traffic.aiCars[2].angle = Math.PI / 2;
+  world.traffic.aiCars[2].speed = 150;
+  // Peds near the corner.
+  const peds = world.traffic.peds;
+  peds[0].x = 1500; peds[0].y = 1200; peds[0].state = 'walk';
+  peds[1].x = 1730; peds[1].y = 1210; peds[1].state = 'walk';
+  peds[2].x = 1510; peds[2].y = 1360; peds[2].state = 'walk';
+  peds[3].x = 1760; peds[3].y = 1360; peds[3].state = 'walk';
+  centreCamera(world, p);
+  world.message = '';
+  world.messageTimer = 0;
 }
 
-function stageChase(state) {
-  // Mission 2 in progress: the gold coupe, stolen, wanted level 3, two interceptors.
-  state.dayStart = 14;
-  state.timeOfDay = 14;
-  startMission(state, 1);
-  state.missionIndex = 1;
-  state.missionStage = 1;
-  state.wanted = 3;
-  state.wantedTimer = 9;
-  state.message = { text: 'Getaway — the gold coupe is yours. Lose them!', until: state.time + 4 };
-  const car = state.goldCar;
-  car.x = 600;
-  car.y = 1024;
-  car.angle = 0;
-  enterCar(state.player, car);
-  addChaser(state, -160, 40);
-  addChaser(state, -260, -30);
-  for (let i = 0; i < 3 / STEP; i += 1) {
-    stepWorld(state, driveAutopilot(state), STEP);
-  }
-  computeCamera(state, 1280, 720);
-  return 'play';
+// Player on the sand at the south beach, water behind, a car parked
+// on the sand, the pier and palms in frame, mission 1's marker ahead.
+function stageBeach(world) {
+  const p = world.player;
+  p.money = 400;
+  p.rp = 150;
+  world.missions.index = 0;
+  world.missions.stage = 1;
+  world.missions.stageStarted = true;
+  world.missions.hasPackage = false;
+  p.x = 1230; // stand beside the beachfront marker, not on top of it
+  p.y = 2255;
+  p.onFoot = true;
+  p.car = null;
+  p.angle = Math.PI / 2; // facing the water
+  setWanted(world.wanted, 0);
+  world.police.cars = [];
+  const parked = world.traffic.parked[0];
+  parked.x = 1200;
+  parked.y = 2240;
+  parked.angle = 0;
+  // A couple of peds strolling the sand.
+  world.traffic.peds[0].x = 1400; world.traffic.peds[0].y = 2250; world.traffic.peds[0].state = 'walk';
+  world.traffic.peds[1].x = 1120; world.traffic.peds[1].y = 2270; world.traffic.peds[1].state = 'walk';
+  centreCamera(world, p);
+  world.message = '';
+  world.messageTimer = 0;
 }
 
-function stageStreet(state) {
-  // Mission 1 on foot: pistol out, one star, a cop closing in, traffic all around.
-  state.dayStart = 11;
-  state.timeOfDay = 11;
-  state.missionIndex = 0;
-  state.missionStage = 0;
-  state.wanted = 1;
-  state.wantedTimer = 9;
-  state.player.x = 980;
-  state.player.y = 980;
-  state.player.angle = 0.4;
-  state.cops.push({ x: 760, y: 940, angle: 0, speed: 205, bustTimer: 0, color: '#20264d' });
-  addChaser(state, -420, 120);
-  const marker = { x: state.city.docks.x, y: state.city.docks.y };
-  for (let i = 0; i < 4 / STEP; i += 1) {
-    stepWorld(state, walkAutopilot(state, marker), STEP);
-  }
-  // The player fires once, so the muzzle flash and the fleeing pedestrians show.
-  state.bullets.push({
-    x: state.player.x + 30, y: state.player.y + 10,
-    vx: 700, vy: 200, life: 0.5, from: 'player', damage: 34,
-  });
-  scarePedestrians(state.peds, state.player.x, state.player.y, 320);
-  computeCamera(state, 1280, 720);
-  return 'play';
-}
-
-function stageBeach(state) {
-  // Dusk on Ocean Drive: the player racing the beachfront, a chaser behind,
-  // pedestrians fleeing the sirens.
-  state.dayStart = 18.5;
-  state.timeOfDay = 18.5;
-  state.missionIndex = 1;
-  state.missionStage = 1;
-  state.wanted = 2;
-  state.wantedTimer = 9;
-  state.message = { text: 'Dusk on Ocean Drive — outrun the tail.', until: state.time + 4 };
-  const car = state.cars.find((c) => c.kind === 'parked');
-  car.x = 600;
-  car.y = 2224;
-  car.angle = 0;
-  enterCar(state.player, car);
-  addChaser(state, -200, 30);
-  scarePedestrians(state.peds, state.player.x, state.player.y, 400);
-  for (let i = 0; i < 3 / STEP; i += 1) {
-    stepWorld(state, driveAutopilot(state), STEP);
-  }
-  computeCamera(state, 1280, 720);
-  return 'play';
-}
-
-function stageTitle(state) {
-  state.dayStart = 10;
-  state.timeOfDay = 10;
-  state.screen = 'title';
-  state.player.x = 1600;
-  state.player.y = 1200;
-  computeCamera(state, 1280, 720);
-  return 'title';
-}
-
-/**
- * Set `state` to the named scene (chase, street, beach or title) and return the
- * screen to draw over it.
- */
-export function stageShot(name, state) {
-  if (name === 'chase') return stageChase(state);
-  if (name === 'street') return stageStreet(state);
-  if (name === 'beach') return stageBeach(state);
-  return stageTitle(state);
+export function stageShot(world, name) {
+  world.time = 12.5; // fixed time so pulses/waves are identical each run
+  world.clockMin = 19 * 60 + 31; // 19:31, golden hour
+  if (name === 'chase') stageChase(world);
+  else if (name === 'street') stageStreet(world);
+  else if (name === 'beach') stageBeach(world);
+  else if (name === 'title') { /* title screen is drawn by main.js */ }
+  else throw new Error(`unknown shot: ${name}`);
+  return name;
 }

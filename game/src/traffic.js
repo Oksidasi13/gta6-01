@@ -1,110 +1,234 @@
-// Vice Shores — pedestrians and the traffic around them. Pedestrians stroll the
-// sidewalks; a gunshot, a speeding car or a body on the ground sends them running.
-// Traffic cars are updated here too, so the world has one place that moves the street.
-import { PED_COUNT, PED_WALK_SPEED, PED_FLEE_SPEED, SIDEWALK } from './config.js';
-import { ROADS_VERTICAL, ROADS_HORIZONTAL, ROAD_WIDTH } from './config.js';
-import { makeRng, pickFrom, randomInt } from './random.js';
-import { nearestRoad } from './city.js';
-import { updateTrafficCar, collideCars } from './cars.js';
+// Vice Shores — traffic: AI cars cruising the roads, parked cars,
+// pedestrians on the sidewalks who flee from trouble, plus the
+// market thugs (mission 4) and ammo / armour pickups.
 
-export function makePedestrian(x, y, angle) {
+import { WORLD, TRAFFIC } from './config.js';
+import { mulberry32, rand, pick, clamp } from './random.js';
+import { createCar, updateAICar, randomCarColor, randomCarName } from './cars.js';
+
+const PED_SHIRTS = ['#e74c3c', '#3498db', '#f1c40f', '#9b59b6', '#1abc9c', '#e67e22', '#ecf0f1', '#fd79a8'];
+const PED_PANTS = ['#2c3e50', '#5d4037', '#37474f', '#4a235a', '#1b4f72'];
+
+export function createTraffic(city, seed = 20240) {
+  const rng = mulberry32(seed);
+  const aiCars = [];
+  for (let i = 0; i < TRAFFIC.aiCars; i++) {
+    const vertical = rng() < 0.5;
+    let x;
+    let y;
+    let angle;
+    if (vertical) {
+      const rx = pick(rng, city.roadsX);
+      x = rx + (rng() < 0.5 ? -14 : 14); // drive on the right side of the road
+      y = rand(rng, 80, WORLD.h - 80);
+      angle = rng() < 0.5 ? Math.PI / 2 : -Math.PI / 2;
+    } else {
+      const ry = pick(rng, city.roadsY);
+      y = ry + (rng() < 0.5 ? -14 : 14);
+      x = rand(rng, 80, WORLD.w - 80);
+      angle = rng() < 0.5 ? 0 : Math.PI;
+    }
+    const car = createCar(x, y, angle, randomCarColor(rng), {
+      kind: 'civilian', id: 100 + i, name: randomCarName(rng),
+      ai: { vertical, speed: rand(rng, 120, 180), turnAt: null },
+    });
+    car.speed = car.ai.speed;
+    aiCars.push(car);
+  }
+
+  const parked = [];
+  for (let i = 0; i < TRAFFIC.parkedCars; i++) {
+    const vertical = rng() < 0.5;
+    let x;
+    let y;
+    let angle;
+    if (vertical) {
+      const rx = pick(rng, city.roadsX);
+      x = rx + (rng() < 0.5 ? -26 : 26);
+      y = rand(rng, 300, 2100);
+      angle = rng() < 0.5 ? Math.PI / 2 : -Math.PI / 2;
+    } else {
+      const ry = pick(rng, city.roadsY);
+      y = ry + (rng() < 0.5 ? -26 : 26);
+      x = rand(rng, 300, 2900);
+      angle = rng() < 0.5 ? 0 : Math.PI;
+    }
+    parked.push(createCar(x, y, angle, randomCarColor(rng), {
+      kind: 'civilian', parked: true, id: 200 + i, name: randomCarName(rng),
+    }));
+  }
+
+  const peds = [];
+  for (let i = 0; i < TRAFFIC.pedCount; i++) {
+    peds.push(spawnPed(city, rng, 300 + i));
+  }
+  return { aiCars, parked, peds };
+}
+
+export function spawnPed(city, rng, id) {
+  // Pedestrians walk on sidewalks: just off a road band.
+  const vertical = rng() < 0.5;
+  let x;
+  let y;
+  if (vertical) {
+    const rx = pick(rng, city.roadsX);
+    x = rx + (rng() < 0.5 ? -44 : 44);
+    y = rand(rng, 120, 2150);
+  } else {
+    const ry = pick(rng, city.roadsY);
+    y = ry + (rng() < 0.5 ? -44 : 44);
+    x = rand(rng, 120, 3050);
+  }
   return {
-    x, y, angle,
-    speed: PED_WALK_SPEED * (0.8 + Math.random() * 0.4),
-    state: 'walk',
-    fleeX: 0, fleeY: 0,
-    scaredTimer: 0,
+    x, y,
+    angle: rand(rng, 0, Math.PI * 2),
+    speed: rand(rng, 40, 70),
+    shirt: pick(rng, PED_SHIRTS),
+    pants: pick(rng, PED_PANTS),
+    walkPhase: rand(rng, 0, Math.PI * 2), // two-frame walk bob
+    state: 'walk', // 'walk' | 'flee' | 'down'
     downTimer: 0,
-    color: pickFrom(Math.random, ['#e8b73a', '#7a4fd0', '#3d7dd9', '#d94f3d', '#3aa655', '#e8e8e8']),
+    fleeTimer: 0,
+    thug: false,
+    hp: 0,
+    id,
   };
 }
 
-/** Scatter pedestrians on sidewalks across the city. */
-export function spawnPedestrians(city, rng, count) {
-  const peds = [];
-  for (let n = 0; n < count; n += 1) {
-    const vertical = rng() < 0.5;
-    let x; let y; let angle;
-    if (vertical) {
-      const road = pickFrom(rng, ROADS_VERTICAL);
-      x = road + (rng() < 0.5 ? -1 : 1) * (ROAD_WIDTH / 2 + SIDEWALK);
-      y = randomInt(rng, 150, city.height - 150);
-      angle = rng() < 0.5 ? Math.PI / 2 : -Math.PI / 2;
-    } else {
-      const road = pickFrom(rng, ROADS_HORIZONTAL);
-      x = randomInt(rng, 150, city.width - 150);
-      y = road + (rng() < 0.5 ? -1 : 1) * (ROAD_WIDTH / 2 + SIDEWALK);
-      angle = rng() < 0.5 ? 0 : Math.PI;
-    }
-    peds.push(makePedestrian(x, y, angle));
-  }
-  return peds;
+// Market thugs for mission 4: tough peds that stand their ground and
+// swing at the player up close. Two punches (or a few bullets) drop one.
+export function spawnThugs(marketX, marketY) {
+  const spots = [
+    [marketX - 60, marketY - 40], [marketX + 70, marketY - 50],
+    [marketX - 40, marketY + 60], [marketX + 50, marketY + 70],
+  ];
+  return spots.map(([x, y], i) => ({
+    x, y,
+    angle: 0,
+    speed: 90,
+    shirt: '#8e1616',
+    pants: '#1a1a1a',
+    walkPhase: 0,
+    state: 'walk',
+    downTimer: 0,
+    fleeTimer: 0,
+    thug: true,
+    hp: 68, // two punches at 34 damage
+    punchCooldown: 0,
+    id: 700 + i,
+  }));
 }
 
-/** Scare every pedestrian near (x, y): they run away from it, along the sidewalk. */
-export function scarePedestrians(peds, x, y, radius) {
-  for (const ped of peds) {
-    if (ped.downTimer > 0) continue;
-    const d = Math.hypot(ped.x - x, ped.y - y);
-    if (d < radius) {
-      ped.state = 'flee';
-      ped.scaredTimer = 3;
-      // Flee along the nearest road's direction, away from the threat — running
-      // across the road into traffic would only get them hit.
-      const road = nearestRoad(ped.x, ped.y);
-      if (road.axis === 'v') {
-        ped.fleeX = 0;
-        ped.fleeY = ped.y > y ? 1 : -1;
-      } else {
-        ped.fleeX = ped.x > x ? 1 : -1;
-        ped.fleeY = 0;
+// AI cars: drive along their road; at intersections sometimes turn onto
+// the crossing road; turn around at the city edge instead of leaving.
+export function updateTraffic(traffic, dt, city) {
+  for (const car of traffic.aiCars) {
+    const ai = car.ai;
+    // Approaching an intersection? Maybe turn.
+    const cross = ai.vertical ? city.roadsY : city.roadsX;
+    const pos = ai.vertical ? car.y : car.x;
+    for (const c of cross) {
+      if (Math.abs(pos - c) < 6 && ai.turnAt !== c) {
+        ai.turnAt = c;
+        if (Math.random() < 0.35) {
+          // Turn onto the crossing road.
+          ai.vertical = !ai.vertical;
+          const dir = Math.random() < 0.5 ? 1 : -1;
+          car.angle = ai.vertical ? (dir > 0 ? Math.PI / 2 : -Math.PI / 2) : (dir > 0 ? 0 : Math.PI);
+          if (ai.vertical) car.x = c + (dir > 0 ? -14 : 14);
+          else car.y = c + (dir > 0 ? -14 : 14);
+        }
+        break;
       }
-      // Keep them on the sidewalk: nudge them back toward it if they drift.
-      const side = road.axis === 'v'
-        ? Math.sign(ped.x - road.at) || 1
-        : Math.sign(ped.y - road.at) || 1;
-      if (road.axis === 'v') ped.x = road.at + side * (ROAD_WIDTH / 2 + SIDEWALK);
-      else ped.y = road.at + side * (ROAD_WIDTH / 2 + SIDEWALK);
     }
+    // Turn around at the city edge.
+    if (ai.vertical) {
+      if (car.y < 60 && Math.sin(car.angle) < 0) car.angle = Math.PI / 2;
+      if (car.y > WORLD.h - 60 && Math.sin(car.angle) > 0) car.angle = -Math.PI / 2;
+    } else {
+      if (car.x < 60 && Math.cos(car.angle) < 0) car.angle = 0;
+      if (car.x > WORLD.w - 60 && Math.cos(car.angle) > 0) car.angle = Math.PI;
+    }
+    car.speed = ai.speed;
+    updateAICar(car, dt, city);
   }
 }
 
-/** One pedestrian's step: stroll, flee, or lie down after being hit. */
-export function updatePedestrian(city, ped, dt) {
-  if (ped.downTimer > 0) {
-    ped.downTimer -= dt;
-    return;
-  }
-  if (ped.state === 'flee') {
-    ped.scaredTimer -= dt;
-    ped.x += ped.fleeX * PED_FLEE_SPEED * dt;
-    ped.y += ped.fleeY * PED_FLEE_SPEED * dt;
-    ped.angle = Math.atan2(ped.fleeY, ped.fleeX);
-    if (ped.scaredTimer <= 0) ped.state = 'walk';
-  } else {
-    ped.x += Math.cos(ped.angle) * ped.speed * dt;
-    ped.y += Math.sin(ped.angle) * ped.speed * dt;
-    // At an intersection, sometimes turn onto the crossing sidewalk.
-    const road = nearestRoad(ped.x, ped.y);
-    if (road.dist < 70 && Math.random() < 0.004) {
-      ped.angle = road.axis === 'v'
-        ? (Math.random() < 0.5 ? 0 : Math.PI)
-        : (Math.random() < 0.5 ? Math.PI / 2 : -Math.PI / 2);
+// Pedestrians: stroll the sidewalks; flee from a threat point (the player
+// punching, shooting, or driving close at speed). A downed ped gets up
+// after a few seconds. Thugs chase the player instead of fleeing.
+export function updatePeds(traffic, dt, city, threat, player) {
+  for (const ped of traffic.peds) {
+    if (ped.state === 'down') {
+      ped.downTimer -= dt;
+      if (ped.downTimer <= 0) ped.state = 'walk';
+      continue;
     }
+    if (ped.thug && player) {
+      // Thugs close in and swing when they reach the player.
+      const d = Math.hypot(player.x - ped.x, player.y - ped.y);
+      if (d < 420) {
+        ped.angle = Math.atan2(player.y - ped.y, player.x - ped.x);
+        if (d > 26) {
+          ped.x += Math.cos(ped.angle) * ped.speed * dt;
+          ped.y += Math.sin(ped.angle) * ped.speed * dt;
+          ped.walkPhase += dt * 9;
+        }
+        ped.punchCooldown -= dt;
+        if (d < 30 && ped.punchCooldown <= 0) {
+          ped.punchCooldown = 1.1;
+          ped.swung = true; // world.js turns this into player damage
+        }
+        continue;
+      }
+    }
+    if (threat) {
+      const d = Math.hypot(ped.x - threat.x, ped.y - threat.y);
+      if (d < TRAFFIC.fleeRadius && !ped.thug) {
+        ped.state = 'flee';
+        ped.fleeTimer = 1.2;
+        ped.angle = Math.atan2(ped.y - threat.y, ped.x - threat.x);
+      }
+    }
+    if (ped.state === 'flee') {
+      ped.fleeTimer -= dt;
+      ped.x += Math.cos(ped.angle) * TRAFFIC.fleeSpeed * dt;
+      ped.y += Math.sin(ped.angle) * TRAFFIC.fleeSpeed * dt;
+      ped.walkPhase += dt * 12;
+      if (ped.fleeTimer <= 0) ped.state = 'walk';
+    } else {
+      // Stroll: keep walking, bounce off the world edge, drift angle a little.
+      ped.x += Math.cos(ped.angle) * ped.speed * dt;
+      ped.y += Math.sin(ped.angle) * ped.speed * dt;
+      ped.walkPhase += dt * 7;
+      if (ped.x < 40 || ped.x > WORLD.w - 40 || ped.y < 40 || ped.y > 2150) {
+        ped.angle += Math.PI;
+      }
+    }
+    ped.x = clamp(ped.x, 30, WORLD.w - 30);
+    ped.y = clamp(ped.y, 30, 2160);
   }
-  ped.x = Math.max(20, Math.min(city.width - 20, ped.x));
-  ped.y = Math.max(20, Math.min(city.height - 20, ped.y));
 }
 
-/** Move every traffic car and pedestrian one step; cars bump each other. */
-export function updateStreet(city, cars, peds, dt) {
-  for (const car of cars) {
-    if (car.kind === 'traffic' && car.driver === 'ai') updateTrafficCar(city, car, cars, dt);
+// Knock a ped down (punch / bullet / car hit). Thugs need two punches:
+// the first only staggers them (hp drops), the second puts them down.
+// Returns 'down' | 'hit' | false.
+export function knockPedDown(ped, seconds = 4, damage = 34) {
+  if (ped.state === 'down') return false;
+  if (ped.thug) {
+    ped.hp -= damage;
+    if (ped.hp > 0) return 'hit';
   }
-  for (let i = 0; i < cars.length; i += 1) {
-    for (let j = i + 1; j < cars.length; j += 1) {
-      if (cars[i].kind !== 'parked' && cars[j].kind !== 'parked') collideCars(cars[i], cars[j]);
-    }
-  }
-  for (const ped of peds) updatePedestrian(city, ped, dt);
+  ped.state = 'down';
+  ped.downTimer = seconds;
+  return 'down';
+}
+
+// Ammo / armour pickups on the map. Collected by walking or driving over.
+export function createPickups() {
+  return [
+    { x: 560, y: 560, kind: 'ammo', taken: false, respawn: 0 },
+    { x: 2360, y: 1640, kind: 'ammo', taken: false, respawn: 0 },
+    { x: 920, y: 2000, kind: 'armour', taken: false, respawn: 0 },
+  ];
 }

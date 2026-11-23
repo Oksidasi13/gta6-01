@@ -1,86 +1,81 @@
-// Vice Shores — input: keyboard and mouse, with edge-triggered keys the world
-// consumes once per frame (so one press is one action, never a held-down repeat).
-export class Input {
-  constructor(canvas) {
-    this.up = false;
-    this.down = false;
-    this.left = false;
-    this.right = false;
-    this.sprint = false;
-    this.handbrake = false;
-    this.mouseX = 0;
-    this.mouseY = 0;
-    this.mousePressed = false;
-    this.pressed = new Set();
-    this.canvas = canvas;
-    this.attach(canvas);
-  }
+// Vice Shores — keyboard + mouse input, with a scripted-input helper
+// so screenshots and tests can drive the game deterministically.
 
-  attach(canvas) {
-    window.addEventListener('keydown', (event) => {
-      if (['ArrowUp', 'ArrowDown', 'ArrowLeft', 'ArrowRight', 'Space'].includes(event.code)) event.preventDefault();
-      this.setKey(event.code, true);
-      this.pressed.add(event.code);
-    });
-    window.addEventListener('keyup', (event) => {
-      this.setKey(event.code, false);
-    });
-    canvas.addEventListener('mousemove', (event) => {
-      const rect = canvas.getBoundingClientRect();
-      this.mouseX = event.clientX - rect.left;
-      this.mouseY = event.clientY - rect.top;
-    });
-    canvas.addEventListener('mousedown', (event) => {
-      const rect = canvas.getBoundingClientRect();
-      this.mouseX = event.clientX - rect.left;
-      this.mouseY = event.clientY - rect.top;
-      this.mousePressed = true;
-    });
-    canvas.addEventListener('mouseup', () => {
-      this.mousePressed = false;
-    });
-  }
-
-  setKey(code, down) {
-    if (code === 'KeyW' || code === 'ArrowUp') this.up = down;
-    if (code === 'KeyS' || code === 'ArrowDown') this.down = down;
-    if (code === 'KeyA' || code === 'ArrowLeft') this.left = down;
-    if (code === 'KeyD' || code === 'ArrowRight') this.right = down;
-    if (code === 'ShiftLeft' || code === 'ShiftRight') this.sprint = down;
-    if (code === 'Space') this.handbrake = down;
-  }
-
-  /** True once for each press since the last frame; clears the flag. */
-  consume(code) {
-    if (this.pressed.has(code)) {
-      this.pressed.delete(code);
-      return true;
-    }
-    return false;
-  }
-
-  /** End-of-frame housekeeping: the mouse click is a one-frame action. */
-  endFrame() {
-    this.mousePressed = false;
-  }
-
-  /** The mouse position in world coordinates, through the camera. */
-  aimWorld(camera) {
-    if (!camera) return { x: 0, y: 0 };
-    return { x: camera.x + this.mouseX, y: camera.y + this.mouseY };
-  }
+export function createInput() {
+  return {
+    keys: Object.create(null), // code -> true while held
+    mouse: { x: 0, y: 0, down: false, clicked: false, clickedX: 0, clickedY: 0 },
+    // Edge-triggered presses consumed once per frame by the game loop.
+    pressed: Object.create(null),
+    scripted: false,
+  };
 }
 
-/** A scripted input for the deterministic screenshot scenes: no DOM, no events. */
-export function makeScriptedInput(overrides) {
-  return {
-    up: false, down: false, left: false, right: false,
-    sprint: false, handbrake: false,
-    mouseX: 0, mouseY: 0, mousePressed: false,
-    pressed: new Set(),
-    consume() { return false; },
-    endFrame() {},
-    aimWorld(camera) { return { x: camera ? camera.x + 640 : 0, y: camera ? camera.y + 360 : 0 }; },
-    ...(overrides || {}),
+// Attach live listeners. Safe to call in a browser only; does nothing
+// in a non-DOM environment (tests import this module in node).
+export function attachInput(input, element) {
+  if (typeof window === 'undefined' || !element) return;
+  const down = (e) => {
+    if (['ArrowUp', 'ArrowDown', 'ArrowLeft', 'ArrowRight', 'Space'].includes(e.code)) {
+      e.preventDefault();
+    }
+    if (!input.keys[e.code]) input.pressed[e.code] = true;
+    input.keys[e.code] = true;
   };
+  const up = (e) => { input.keys[e.code] = false; };
+  window.addEventListener('keydown', down);
+  window.addEventListener('keyup', up);
+  window.addEventListener('blur', () => { input.keys = Object.create(null); });
+  element.addEventListener('mousemove', (e) => {
+    const r = element.getBoundingClientRect();
+    input.mouse.x = e.clientX - r.left;
+    input.mouse.y = e.clientY - r.top;
+  });
+  element.addEventListener('mousedown', (e) => {
+    const r = element.getBoundingClientRect();
+    input.mouse.x = e.clientX - r.left;
+    input.mouse.y = e.clientY - r.top;
+    input.mouse.down = true;
+    input.mouse.clicked = true;
+    input.mouse.clickedX = input.mouse.x;
+    input.mouse.clickedY = input.mouse.y;
+  });
+  window.addEventListener('mouseup', () => { input.mouse.down = false; });
+  input._detach = () => {
+    window.removeEventListener('keydown', down);
+    window.removeEventListener('keyup', up);
+  };
+}
+
+export function isDown(input, ...codes) {
+  return codes.some((c) => !!input.keys[c]);
+}
+
+export function wasPressed(input, code) {
+  return !!input.pressed[code];
+}
+
+// True when any of the given codes was pressed this frame (weapon slots,
+// crew abilities and radio all share this pattern).
+export function wasPressedAny(input, codes) {
+  return codes.some((c) => !!input.pressed[c]);
+}
+
+// Clear edge-triggered state at the end of each frame.
+export function endFrame(input) {
+  input.pressed = Object.create(null);
+  input.mouse.clicked = false;
+}
+
+// Scripted input for deterministic screenshots: pretend keys are held.
+export function setScriptedKeys(input, codes) {
+  input.scripted = true;
+  input.keys = Object.create(null);
+  for (const c of codes) input.keys[c] = true;
+}
+
+export function setScriptedMouse(input, x, y, down = false) {
+  input.mouse.x = x;
+  input.mouse.y = y;
+  input.mouse.down = down;
 }
